@@ -2,7 +2,6 @@ import {
 	App,
 	PluginSettingTab,
 	Setting,
-	SettingDefinition,
 	SettingDefinitionGroup,
 	SettingDefinitionItem,
 } from "obsidian";
@@ -10,16 +9,6 @@ import type OpenWhisprPlugin from "./main";
 import type { OpenWhisprSettings } from "./types";
 
 type SettingKey = keyof OpenWhisprSettings;
-
-/** Settings whose value decides whether another setting is shown. */
-const VISIBILITY_KEYS = new Set<string>(["folderStructure", "syncAllHistory"]);
-
-/** Evaluate a `visible`/`disabled`-style predicate that may be a plain boolean. */
-function isVisible(item: { visible?: boolean | (() => boolean) }): boolean {
-	const v = item.visible;
-	if (v === undefined) return true;
-	return typeof v === "function" ? v() : v;
-}
 
 function isGroup(item: SettingDefinitionItem): item is SettingDefinitionGroup {
 	return "type" in item && (item.type === "group" || item.type === "list");
@@ -68,13 +57,6 @@ export class OpenWhisprSettingTab extends PluginSettingTab {
 		const bag = this.settings as unknown as Record<string, unknown>;
 		bag[key] = this.normalize(key, value);
 		await this.save();
-
-		// Only the keys that gate a `visible` predicate trigger a re-render.
-		// Text controls fire on every keystroke, and re-rendering there would
-		// tear down the focused input and reset the scroll position.
-		if (!VISIBILITY_KEYS.has(key)) return;
-		// `update()` only exists on 1.13+; the legacy renderer re-runs `display()`.
-		if (typeof this.update === "function") this.update();
 	}
 
 	/** Trim/fallback/parse rules applied before a value is stored. */
@@ -295,8 +277,8 @@ export class OpenWhisprSettingTab extends PluginSettingTab {
 					name: "Folder date format",
 					desc:
 						"Date format for date-based subfolders. Use / to nest: YYYY-MM-DD " +
-						"→ 2026-07-15, YYYY/MM → 2026/07, YYYY/MM/DD → 2026/07/15.",
-					visible: () => this.settings.folderStructure === "date",
+						"→ 2026-07-15, YYYY/MM → 2026/07, YYYY/MM/DD → 2026/07/15. " +
+						"Only applies when Folder structure is set to Date-based subfolders.",
 					control: {
 						type: "text",
 						key: "folderDateFormat",
@@ -341,8 +323,7 @@ export class OpenWhisprSettingTab extends PluginSettingTab {
 					desc:
 						"Maximum number of most-recent notes to pull per sync. Keeps routine " +
 						"syncs quick; use 'Sync all historical notes' to backfill older " +
-						"ones. Default: 50.",
-					visible: () => !this.settings.syncAllHistory,
+						"ones. Ignored while Sync all historical notes is on. Default: 50.",
 					control: {
 						type: "number",
 						key: "syncLimit",
@@ -392,15 +373,14 @@ export class OpenWhisprSettingTab extends PluginSettingTab {
 
 		for (const item of this.getSettingDefinitions()) {
 			if (isGroup(item)) {
-				if (!isVisible(item)) continue;
 				if (item.heading) {
 					new Setting(containerEl).setName(item.heading).setHeading();
 				}
 				for (const child of item.items ?? []) {
-					this.renderLegacy(containerEl, child as SettingDefinition<SettingKey>);
+					this.renderLegacy(containerEl, child);
 				}
 			} else {
-				this.renderLegacy(containerEl, item as SettingDefinition<SettingKey>);
+				this.renderLegacy(containerEl, item);
 			}
 		}
 	}
@@ -408,9 +388,10 @@ export class OpenWhisprSettingTab extends PluginSettingTab {
 	/** Render one definition with the pre-1.13 imperative `Setting` API. */
 	private renderLegacy(
 		containerEl: HTMLElement,
-		def: SettingDefinition<SettingKey>
+		def: SettingDefinitionItem<SettingKey>
 	): void {
-		if (!isVisible(def)) return;
+		// This plugin defines no nested groups, lists, or pages.
+		if (isGroup(def) || ("type" in def && def.type === "page")) return;
 
 		const setting = new Setting(containerEl).setName(def.name);
 		if (def.desc) setting.setDesc(def.desc);
@@ -424,18 +405,13 @@ export class OpenWhisprSettingTab extends PluginSettingTab {
 		if (!("control" in def) || !def.control) return;
 
 		const control = def.control;
-		const commit = async (value: unknown) => {
-			await this.setControlValue(control.key, value);
-			// Re-render only for the keys that gate a `visible` predicate —
-			// see the note in setControlValue.
-			if (VISIBILITY_KEYS.has(control.key)) this.display();
-		};
+		const commit = (value: unknown) => void this.setControlValue(control.key, value);
 		const current = this.getControlValue(control.key);
 
 		switch (control.type) {
 			case "toggle":
 				setting.addToggle((toggle) =>
-					toggle.setValue(Boolean(current)).onChange((value) => void commit(value))
+					toggle.setValue(Boolean(current)).onChange(commit)
 				);
 				break;
 			case "dropdown":
@@ -443,7 +419,7 @@ export class OpenWhisprSettingTab extends PluginSettingTab {
 					dd
 						.addOptions(control.options)
 						.setValue(String(current ?? ""))
-						.onChange((value) => void commit(value))
+						.onChange(commit)
 				);
 				break;
 			case "text":
@@ -451,9 +427,7 @@ export class OpenWhisprSettingTab extends PluginSettingTab {
 				setting.addText((text) => {
 					if (control.placeholder) text.setPlaceholder(control.placeholder);
 					if (control.type === "number") text.inputEl.type = "number";
-					text
-						.setValue(String(current ?? ""))
-						.onChange((value) => void commit(value));
+					text.setValue(String(current ?? "")).onChange(commit);
 				});
 				break;
 			default:
