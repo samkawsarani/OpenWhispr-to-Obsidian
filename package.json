@@ -1,6 +1,6 @@
 {
   "name": "openwhispr-to-obsidian",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Sync OpenWhispr notes and transcripts into an Obsidian vault via the OpenWhispr CLI.",
   "main": "main.js",
   "scripts": {

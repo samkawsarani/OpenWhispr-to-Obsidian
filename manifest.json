@@ -1,7 +1,7 @@
 {
 	"id": "openwhispr-sync",
 	"name": "OpenWhispr Sync",
-	"version": "1.0.5",
+	"version": "1.0.6",
 	"minAppVersion": "1.6.6",
 	"description": "Sync your OpenWhispr notes and speaker-labeled transcripts into your vault using the OpenWhispr CLI.",
 	"author": "Sam Kawsarani",
