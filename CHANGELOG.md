@@ -6,12 +6,7 @@ All notable changes to this project are documented in this file.
 
 ## [1.0.7] - 2026-07-19
 
-### Fixed
-
-- Removed a call to `SettingTab.update()`, which is newer than the declared
-  minimum Obsidian version. The two conditional settings ("Folder date format"
-  and "Sync limit") now always render, with their condition stated in the
-  description.
+- Changes based on Obsidian plugin submission review
 
 ## [1.0.6] - 2026-07-19
 
