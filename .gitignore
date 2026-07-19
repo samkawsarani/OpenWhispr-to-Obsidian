@@ -1,0 +1,15 @@
+# build output
+main.js
+
+# dependencies
+node_modules/
+
+# obsidian
+data.json
+
+# system
+.DS_Store
+
+# editors
+.vscode/
+*.log

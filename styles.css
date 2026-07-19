@@ -1,0 +1,21 @@
+/* OpenWhispr Sync — status bar + settings styling */
+
+.openwhispr-status {
+	cursor: default;
+}
+
+.openwhispr-status.is-syncing {
+	color: var(--text-accent);
+}
+
+.openwhispr-status.is-error {
+	color: var(--text-error);
+}
+
+.openwhispr-status.is-success {
+	color: var(--text-success);
+}
+
+.openwhispr-setting-heading {
+	margin-top: 1.5em;
+}

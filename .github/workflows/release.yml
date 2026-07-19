@@ -1,0 +1,99 @@
+name: Release
+
+# Publishes a GitHub Release whenever a version tag is pushed.
+# Tags must match manifest.json's version with no "v" prefix (e.g. 1.0.1),
+# which is what `npm version` produces given the repo's .npmrc.
+on:
+  push:
+    tags:
+      - "[0-9]+.[0-9]+.[0-9]+*"
+
+# Never let two runs for the same tag race a double-publish. Don't cancel a
+# release mid-flight — let an in-progress publish finish.
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write # create the release + upload assets
+  id-token: write # sign build provenance attestations
+  attestations: write # record the attestations
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Verify tag matches manifest version
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          MANIFEST_VERSION="$(node -p "require('./manifest.json').version")"
+          if [ "$TAG" != "$MANIFEST_VERSION" ]; then
+            echo "::error::Tag '$TAG' does not match manifest.json version '$MANIFEST_VERSION'."
+            echo "Obsidian requires the release tag to equal the manifest version exactly."
+            exit 1
+          fi
+
+      - name: Build
+        run: npm run build
+
+      - name: Verify build output
+        run: |
+          for f in main.js manifest.json styles.css; do
+            if [ ! -s "$f" ]; then
+              echo "::error::Required release asset '$f' is missing or empty — refusing to publish."
+              exit 1
+            fi
+          done
+
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@v1
+        with:
+          subject-path: |
+            main.js
+            styles.css
+
+      - name: Extract changelog notes
+        id: notes
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          # Pull the section for this version out of CHANGELOG.md, if present.
+          awk -v ver="$TAG" '
+            $0 ~ "^## \\[" ver "\\]" { flag=1; next }
+            /^## \[/ && flag { flag=0 }
+            flag { print }
+          ' CHANGELOG.md > release-notes.md || true
+          # Trim leading/trailing blank lines.
+          sed -i -e '/./,$!d' release-notes.md
+          if [ -s release-notes.md ]; then
+            echo "have_notes=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "have_notes=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+          HAVE_NOTES: ${{ steps.notes.outputs.have_notes }}
+        run: |
+          if [ "$HAVE_NOTES" = "true" ]; then
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes-file release-notes.md \
+              main.js manifest.json styles.css
+          else
+            # Fall back to GitHub's auto-generated notes from merged PRs/commits.
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --generate-notes \
+              main.js manifest.json styles.css
+          fi
