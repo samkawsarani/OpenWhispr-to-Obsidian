@@ -1,10 +1,29 @@
-import { App, PluginSettingTab, Setting } from "obsidian";
+import {
+	App,
+	PluginSettingTab,
+	Setting,
+	SettingDefinition,
+	SettingDefinitionGroup,
+	SettingDefinitionItem,
+} from "obsidian";
 import type OpenWhisprPlugin from "./main";
-import type {
-	ExistingNoteAction,
-	FilenameSeparator,
-	FolderStructure,
-} from "./types";
+import type { OpenWhisprSettings } from "./types";
+
+type SettingKey = keyof OpenWhisprSettings;
+
+/** Settings whose value decides whether another setting is shown. */
+const VISIBILITY_KEYS = new Set<string>(["folderStructure", "syncAllHistory"]);
+
+/** Evaluate a `visible`/`disabled`-style predicate that may be a plain boolean. */
+function isVisible(item: { visible?: boolean | (() => boolean) }): boolean {
+	const v = item.visible;
+	if (v === undefined) return true;
+	return typeof v === "function" ? v() : v;
+}
+
+function isGroup(item: SettingDefinitionItem): item is SettingDefinitionGroup {
+	return "type" in item && (item.type === "group" || item.type === "list");
+}
 
 export class OpenWhisprSettingTab extends PluginSettingTab {
 	constructor(app: App, private plugin: OpenWhisprPlugin) {
@@ -19,363 +38,426 @@ export class OpenWhisprSettingTab extends PluginSettingTab {
 		return this.plugin.saveSettings();
 	}
 
-	display(): void {
-		const { containerEl } = this;
-		containerEl.empty();
+	/**
+	 * The single source of truth for this plugin's settings UI. Obsidian 1.13+
+	 * renders (and search-indexes) this directly; `display()` below renders the
+	 * same definitions imperatively for older versions.
+	 */
+	getSettingDefinitions(): SettingDefinitionItem<SettingKey>[] {
+		return [
+			this.cliGroup(),
+			this.noteContentGroup(),
+			this.filenamesGroup(),
+			this.organizationGroup(),
+			this.syncGroup(),
+		];
+	}
 
-		this.renderCliSection(containerEl);
-		this.renderNoteContentSection(containerEl);
-		this.renderFilenameSection(containerEl);
-		this.renderOrganizationSection(containerEl);
-		this.renderSyncSection(containerEl);
+	/**
+	 * Obsidian's default accessors persist via `saveData` directly, which would
+	 * bypass `saveSettings()` and leave the auto-sync timer on its old interval.
+	 */
+	getControlValue(key: string): unknown {
+		const value = (this.settings as unknown as Record<string, unknown>)[key];
+		// autoSyncMinutes is stored as a number but bound to a dropdown, and
+		// dropdown controls are string-valued.
+		return key === "autoSyncMinutes" ? String(value) : value;
+	}
+
+	async setControlValue(key: string, value: unknown): Promise<void> {
+		const bag = this.settings as unknown as Record<string, unknown>;
+		bag[key] = this.normalize(key, value);
+		await this.save();
+
+		// Only the keys that gate a `visible` predicate trigger a re-render.
+		// Text controls fire on every keystroke, and re-rendering there would
+		// tear down the focused input and reset the scroll position.
+		if (!VISIBILITY_KEYS.has(key)) return;
+		// `update()` only exists on 1.13+; the legacy renderer re-runs `display()`.
+		if (typeof this.update === "function") this.update();
+	}
+
+	/** Trim/fallback/parse rules applied before a value is stored. */
+	private normalize(key: string, value: unknown): unknown {
+		const text = typeof value === "string" ? value.trim() : value;
+
+		switch (key) {
+			case "cliPath":
+				return text || "openwhispr";
+			case "filenameTemplate":
+				return text || "{title}";
+			case "dateFormat":
+			case "folderDateFormat":
+				return text || "YYYY-MM-DD";
+			case "syncFolder":
+				return text || "OpenWhispr";
+			case "syncLimit": {
+				const parsed =
+					typeof value === "number" ? value : Number.parseInt(String(value), 10);
+				return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+			}
+			case "autoSyncMinutes":
+				return Number.parseInt(String(value), 10) || 0;
+			default:
+				return value;
+		}
 	}
 
 	// ---- OpenWhispr CLI ---------------------------------------------------
 
-	private renderCliSection(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName("OpenWhispr CLI").setHeading();
-
-		new Setting(containerEl)
-			.setName("CLI path")
-			.setDesc(
-				'Path to the "openwhispr" executable. Use a bare name to resolve via PATH, ' +
-					"or an absolute path (e.g. /usr/local/bin/openwhispr)."
-			)
-			.addText((text) =>
-				text
-					.setPlaceholder("openwhispr")
-					.setValue(this.settings.cliPath)
-					.onChange(async (value) => {
-						this.settings.cliPath = value.trim() || "openwhispr";
-						await this.save();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Backend")
-			.setDesc("Which OpenWhispr backend to target. Auto lets the CLI decide (local, then remote).")
-			.addDropdown((dd) =>
-				dd
-					.addOptions({ "": "Auto", local: "Local (desktop app)", remote: "Remote (cloud API)" })
-					.setValue(this.settings.backend)
-					.onChange(async (value) => {
-						this.settings.backend = value as "" | "local" | "remote";
-						await this.save();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Test connection")
-			.setDesc("Run the CLI and report its version to confirm the plugin can reach it.")
-			.addButton((btn) =>
-				btn
-					.setButtonText("Test connection")
-					.setCta()
-					.onClick(() => void this.plugin.testConnection())
-			);
+	private cliGroup(): SettingDefinitionGroup<SettingKey> {
+		return {
+			type: "group",
+			heading: "OpenWhispr CLI",
+			items: [
+				{
+					name: "CLI path",
+					desc:
+						'Path to the "openwhispr" executable. Use a bare name to resolve via PATH, ' +
+						"or an absolute path (e.g. /usr/local/bin/openwhispr).",
+					control: { type: "text", key: "cliPath", placeholder: "openwhispr" },
+				},
+				{
+					name: "Backend",
+					desc: "Which OpenWhispr backend to target. Auto lets the CLI decide (local, then remote).",
+					control: {
+						type: "dropdown",
+						key: "backend",
+						options: {
+							"": "Auto",
+							local: "Local (desktop app)",
+							remote: "Remote (cloud API)",
+						},
+					},
+				},
+				{
+					name: "Test connection",
+					desc: "Run the CLI and report its version to confirm the plugin can reach it.",
+					render: (setting) => {
+						setting.addButton((btn) =>
+							btn
+								.setButtonText("Test connection")
+								.setCta()
+								.onClick(() => void this.plugin.testConnection())
+						);
+					},
+				},
+			],
+		};
 	}
 
 	// ---- Note content -----------------------------------------------------
 
-	private renderNoteContentSection(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName("Note content").setHeading();
-
-		new Setting(containerEl)
-			.setName("Include my notes")
-			.setDesc(
-				"Add the notes you typed yourself in OpenWhispr under a ## My Notes " +
-					"heading. Default: on."
-			)
-			.addToggle((toggle) =>
-				toggle.setValue(this.settings.includeMyNotes).onChange(async (value) => {
-					this.settings.includeMyNotes = value;
-					await this.save();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName("Include enhanced notes")
-			.setDesc(
-				"Add OpenWhispr's AI-cleaned rewrite of your notes — grammar fixed, " +
-					"filler removed, action items surfaced — under a ## Enhanced Notes " +
-					"heading. Default: off."
-			)
-			.addToggle((toggle) =>
-				toggle.setValue(this.settings.includeEnhancedNotes).onChange(async (value) => {
-					this.settings.includeEnhancedNotes = value;
-					await this.save();
-				})
-			);
-
-		new Setting(containerEl)
-			.setName("Include full transcript")
-			.setDesc(
-				"Add the complete speaker-labeled transcript with timestamps " +
-					"(e.g. **Me** (0:03): …) under a ## Transcript heading. Can be long. " +
-					"Default: off."
-			)
-			.addToggle((toggle) =>
-				toggle.setValue(this.settings.includeTranscript).onChange(async (value) => {
-					this.settings.includeTranscript = value;
-					await this.save();
-				})
-			);
+	private noteContentGroup(): SettingDefinitionGroup<SettingKey> {
+		return {
+			type: "group",
+			heading: "Note content",
+			items: [
+				{
+					name: "Include my notes",
+					desc:
+						"Add the notes you typed yourself in OpenWhispr under a ## My Notes " +
+						"heading. Default: on.",
+					control: { type: "toggle", key: "includeMyNotes" },
+				},
+				{
+					name: "Include enhanced notes",
+					desc:
+						"Add OpenWhispr's AI-cleaned rewrite of your notes — grammar fixed, " +
+						"filler removed, action items surfaced — under a ## Enhanced Notes " +
+						"heading. Default: off.",
+					control: { type: "toggle", key: "includeEnhancedNotes" },
+				},
+				{
+					name: "Include full transcript",
+					desc:
+						"Add the complete speaker-labeled transcript with timestamps " +
+						"(e.g. **Me** (0:03): …) under a ## Transcript heading. Can be long. " +
+						"Default: off.",
+					control: { type: "toggle", key: "includeTranscript" },
+				},
+			],
+		};
 	}
 
-	// ---- Filename settings ------------------------------------------------
+	// ---- Filenames --------------------------------------------------------
 
-	private renderFilenameSection(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName("Filename settings").setHeading();
-
-		new Setting(containerEl)
-			.setName("Filename prefix")
-			.setDesc(
-				"Optional text added to the start of every filename (e.g. openwhispr-, " +
-					"meeting-) — handy for grouping or spotting synced notes at a glance. " +
-					"Leave empty for none."
-			)
-			.addText((text) =>
-				text
-					.setPlaceholder("openwhispr-")
-					.setValue(this.settings.filenamePrefix)
-					.onChange(async (value) => {
-						this.settings.filenamePrefix = value;
-						await this.save();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Filename template")
-			.setDesc(
-				"Build filenames from tokens: {title}, {id}, {created_date}, {folder}. " +
-					"Example: {created_date}_{title} → 2026-07-15_Weekly-Standup. " +
-					"Default: {title}."
-			)
-			.addText((text) =>
-				text
-					.setPlaceholder("{title}")
-					.setValue(this.settings.filenameTemplate)
-					.onChange(async (value) => {
-						this.settings.filenameTemplate = value.trim() || "{title}";
-						await this.save();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Date format")
-			.setDesc(
-				"Format for the {created_date} token. Tokens: YYYY, MM, DD, HH, mm, ss. " +
-					"Examples: YYYY-MM-DD (2026-07-15), DD-MM-YYYY (15-07-2026), " +
-					"YYYY/MM/DD (nests into subfolders when used in the template)."
-			)
-			.addText((text) =>
-				text
-					.setPlaceholder("YYYY-MM-DD")
-					.setValue(this.settings.dateFormat)
-					.onChange(async (value) => {
-						this.settings.dateFormat = value.trim() || "YYYY-MM-DD";
-						await this.save();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Filename separator")
-			.setDesc(
-				"Character that replaces spaces in filenames — match your naming " +
-					"convention. Each option previews the title 'Daily Standup'."
-			)
-			.addDropdown((dd) =>
-				dd
-					.addOptions({
-						"-": "Dash (-) — Daily-Standup",
-						_: "Underscore (_) — Daily_Standup",
-						" ": "Space — Daily Standup",
-						"": "None — DailyStandup",
-					})
-					.setValue(this.settings.filenameSeparator)
-					.onChange(async (value) => {
-						this.settings.filenameSeparator = value as FilenameSeparator;
-						await this.save();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Existing notes")
-			.setDesc(
-				"What to do when a note that was already synced (matched by its " +
-					"openwhispr_id) has a file in your vault. Overwrite keeps it up to " +
-					"date; Skip preserves any manual edits you made; Timestamped copy " +
-					"leaves the old file and adds a new one (e.g. Standup_13-40.md) when " +
-					"the content has changed. Two different notes that resolve to the " +
-					"same name are always kept as separate files."
-			)
-			.addDropdown((dd) =>
-				dd
-					.addOptions({
-						overwrite: "Overwrite in place",
-						skip: "Skip (leave untouched)",
-						timestamped: "Keep timestamped copy",
-					})
-					.setValue(this.settings.existingNoteAction)
-					.onChange(async (value) => {
-						this.settings.existingNoteAction = value as ExistingNoteAction;
-						await this.save();
-					})
-			);
+	private filenamesGroup(): SettingDefinitionGroup<SettingKey> {
+		return {
+			type: "group",
+			heading: "Filenames",
+			items: [
+				{
+					name: "Filename prefix",
+					desc:
+						"Optional text added to the start of every filename (e.g. openwhispr-, " +
+						"meeting-) — handy for grouping or spotting synced notes at a glance. " +
+						"Leave empty for none.",
+					control: {
+						type: "text",
+						key: "filenamePrefix",
+						placeholder: "openwhispr-",
+					},
+				},
+				{
+					name: "Filename template",
+					desc:
+						"Build filenames from tokens: {title}, {id}, {created_date}, {folder}. " +
+						"Example: {created_date}_{title} → 2026-07-15_Weekly-Standup. " +
+						"Default: {title}.",
+					control: {
+						type: "text",
+						key: "filenameTemplate",
+						placeholder: "{title}",
+					},
+				},
+				{
+					name: "Date format",
+					desc:
+						"Format for the {created_date} token. Tokens: YYYY, MM, DD, HH, mm, ss. " +
+						"Examples: YYYY-MM-DD (2026-07-15), DD-MM-YYYY (15-07-2026), " +
+						"YYYY/MM/DD (nests into subfolders when used in the template).",
+					control: { type: "text", key: "dateFormat", placeholder: "YYYY-MM-DD" },
+				},
+				{
+					name: "Filename separator",
+					desc:
+						"Character that replaces spaces in filenames — match your naming " +
+						"convention. Each option previews the title 'Daily Standup'.",
+					control: {
+						type: "dropdown",
+						key: "filenameSeparator",
+						options: {
+							"-": "Dash (-) — Daily-Standup",
+							_: "Underscore (_) — Daily_Standup",
+							" ": "Space — Daily Standup",
+							"": "None — DailyStandup",
+						},
+					},
+				},
+				{
+					name: "Existing notes",
+					desc:
+						"What to do when a note that was already synced (matched by its " +
+						"openwhispr_id) has a file in your vault. Overwrite keeps it up to " +
+						"date; Skip preserves any manual edits you made; Timestamped copy " +
+						"leaves the old file and adds a new one (e.g. Standup_13-40.md) when " +
+						"the content has changed. Two different notes that resolve to the " +
+						"same name are always kept as separate files.",
+					control: {
+						type: "dropdown",
+						key: "existingNoteAction",
+						options: {
+							overwrite: "Overwrite in place",
+							skip: "Skip (leave untouched)",
+							timestamped: "Keep timestamped copy",
+						},
+					},
+				},
+			],
+		};
 	}
 
 	// ---- File organization ------------------------------------------------
 
-	private renderOrganizationSection(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName("File organization").setHeading();
-
-		new Setting(containerEl)
-			.setName("Sync folder")
-			.setDesc(
-				"Vault folder that synced notes are written to. Created automatically " +
-					"if it doesn't exist. Default: OpenWhispr."
-			)
-			.addText((text) =>
-				text
-					.setPlaceholder("OpenWhispr")
-					.setValue(this.settings.syncFolder)
-					.onChange(async (value) => {
-						this.settings.syncFolder = value.trim() || "OpenWhispr";
-						await this.save();
-					})
-			);
-
-		new Setting(containerEl)
-			.setName("Folder structure")
-			.setDesc(
-				"How notes are organized inside the sync folder. Flat keeps everything " +
-					"in one folder; Date-based groups by creation (meeting) date (e.g. " +
-					"OpenWhispr/2026-07-15/…); Mirror OpenWhispr folders recreates the " +
-					"folders you set up in the OpenWhispr app (e.g. OpenWhispr/Meetings/…). " +
-					"Notes are moved to the right folder automatically on every sync if " +
-					"their folder changes."
-			)
-			.addDropdown((dd) =>
-				dd
-					.addOptions({
-						flat: "Flat (all in one folder)",
-						date: "Date-based subfolders",
-						openwhispr: "Mirror OpenWhispr folders",
-					})
-					.setValue(this.settings.folderStructure)
-					.onChange(async (value) => {
-						this.settings.folderStructure = value as FolderStructure;
-						await this.save();
-						this.display(); // toggle visibility of the date-format field
-					})
-			);
-
-		if (this.settings.folderStructure === "date") {
-			new Setting(containerEl)
-				.setName("Folder date format")
-				.setDesc(
-					"Date format for date-based subfolders. Use / to nest: YYYY-MM-DD " +
-						"→ 2026-07-15, YYYY/MM → 2026/07, YYYY/MM/DD → 2026/07/15."
-				)
-				.addText((text) =>
-					text
-						.setPlaceholder("YYYY-MM-DD")
-						.setValue(this.settings.folderDateFormat)
-						.onChange(async (value) => {
-							this.settings.folderDateFormat = value.trim() || "YYYY-MM-DD";
-							await this.save();
-						})
-				);
-		}
+	private organizationGroup(): SettingDefinitionGroup<SettingKey> {
+		return {
+			type: "group",
+			heading: "File organization",
+			items: [
+				{
+					name: "Sync folder",
+					desc:
+						"Vault folder that synced notes are written to. Created automatically " +
+						"if it doesn't exist. Default: OpenWhispr.",
+					control: { type: "text", key: "syncFolder", placeholder: "OpenWhispr" },
+				},
+				{
+					name: "Folder structure",
+					desc:
+						"How notes are organized inside the sync folder. Flat keeps everything " +
+						"in one folder; Date-based groups by creation (meeting) date (e.g. " +
+						"OpenWhispr/2026-07-15/…); Mirror OpenWhispr folders recreates the " +
+						"folders you set up in the OpenWhispr app (e.g. OpenWhispr/Meetings/…). " +
+						"Notes are moved to the right folder automatically on every sync if " +
+						"their folder changes.",
+					control: {
+						type: "dropdown",
+						key: "folderStructure",
+						options: {
+							flat: "Flat (all in one folder)",
+							date: "Date-based subfolders",
+							openwhispr: "Mirror OpenWhispr folders",
+						},
+					},
+				},
+				{
+					name: "Folder date format",
+					desc:
+						"Date format for date-based subfolders. Use / to nest: YYYY-MM-DD " +
+						"→ 2026-07-15, YYYY/MM → 2026/07, YYYY/MM/DD → 2026/07/15.",
+					visible: () => this.settings.folderStructure === "date",
+					control: {
+						type: "text",
+						key: "folderDateFormat",
+						placeholder: "YYYY-MM-DD",
+					},
+				},
+			],
+		};
 	}
 
 	// ---- Sync -------------------------------------------------------------
 
-	private renderSyncSection(containerEl: HTMLElement): void {
-		new Setting(containerEl).setName("Sync").setHeading();
-
-		new Setting(containerEl)
-			.setName("Manual sync")
-			.setDesc(
-				"Sync your OpenWhispr notes right now. Also available from the ribbon " +
-					"microphone icon and the 'Sync OpenWhispr notes' command."
-			)
-			.addButton((btn) =>
-				btn
-					.setButtonText("Sync now")
-					.setCta()
-					.onClick(() => void this.plugin.syncNotes())
-			);
-
-		new Setting(containerEl)
-			.setName("Sync all historical notes")
-			.setDesc(
-				"When on, every sync pulls your entire note history, ignoring the sync " +
-					"limit. Useful for the first run to backfill everything — turn it off " +
-					"afterward to keep routine syncs fast. Default: off."
-			)
-			.addToggle((toggle) =>
-				toggle.setValue(this.settings.syncAllHistory).onChange(async (value) => {
-					this.settings.syncAllHistory = value;
-					await this.save();
-					this.display(); // toggle visibility of the sync limit field
-				})
-			);
-
-		if (!this.settings.syncAllHistory) {
-			new Setting(containerEl)
-				.setName("Sync limit")
-				.setDesc(
-					"Maximum number of most-recent notes to pull per sync. Keeps routine " +
+	private syncGroup(): SettingDefinitionGroup<SettingKey> {
+		return {
+			type: "group",
+			heading: "Sync",
+			items: [
+				{
+					name: "Manual sync",
+					desc:
+						"Sync your OpenWhispr notes right now. Also available from the ribbon " +
+						"microphone icon and the 'Sync OpenWhispr notes' command.",
+					render: (setting) => {
+						setting.addButton((btn) =>
+							btn
+								.setButtonText("Sync now")
+								.setCta()
+								.onClick(() => void this.plugin.syncNotes())
+						);
+					},
+				},
+				{
+					name: "Sync all historical notes",
+					desc:
+						"When on, every sync pulls your entire note history, ignoring the sync " +
+						"limit. Useful for the first run to backfill everything — turn it off " +
+						"afterward to keep routine syncs fast. Default: off.",
+					control: { type: "toggle", key: "syncAllHistory" },
+				},
+				{
+					name: "Sync limit",
+					desc:
+						"Maximum number of most-recent notes to pull per sync. Keeps routine " +
 						"syncs quick; use 'Sync all historical notes' to backfill older " +
-						"ones. Default: 50."
-				)
-				.addText((text) =>
-					text
-						.setPlaceholder("50")
-						.setValue(String(this.settings.syncLimit))
-						.onChange(async (value) => {
-							const parsed = Number.parseInt(value, 10);
-							this.settings.syncLimit =
-								Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
-							await this.save();
-						})
-				);
+						"ones. Default: 50.",
+					visible: () => !this.settings.syncAllHistory,
+					control: {
+						type: "number",
+						key: "syncLimit",
+						placeholder: "50",
+						min: 1,
+					},
+				},
+				{
+					name: "Auto-sync frequency",
+					desc:
+						"How often to sync automatically in the background. Every 5–10 minutes " +
+						"is a good balance; shorter is more up-to-date but busier, and Never " +
+						"leaves you in full manual control. Default: Never.",
+					control: {
+						type: "dropdown",
+						key: "autoSyncMinutes",
+						options: {
+							"0": "Never",
+							"1": "Every 1 minute",
+							"5": "Every 5 minutes",
+							"10": "Every 10 minutes",
+							"30": "Every 30 minutes",
+							"60": "Every hour",
+							"1440": "Every 24 hours",
+						},
+					},
+				},
+				{
+					name: "Sync on startup",
+					desc: "Run a sync automatically when Obsidian finishes loading.",
+					control: { type: "toggle", key: "syncOnStartup" },
+				},
+			],
+		};
+	}
+
+	// ---- Fallback rendering for Obsidian < 1.13 ---------------------------
+
+	/**
+	 * Obsidian 1.13+ ignores this in favour of `getSettingDefinitions()`. Older
+	 * versions call it, so render the same definitions imperatively rather than
+	 * keeping a second copy of every name and description.
+	 */
+	display(): void {
+		const { containerEl } = this;
+		containerEl.empty();
+
+		for (const item of this.getSettingDefinitions()) {
+			if (isGroup(item)) {
+				if (!isVisible(item)) continue;
+				if (item.heading) {
+					new Setting(containerEl).setName(item.heading).setHeading();
+				}
+				for (const child of item.items ?? []) {
+					this.renderLegacy(containerEl, child as SettingDefinition<SettingKey>);
+				}
+			} else {
+				this.renderLegacy(containerEl, item as SettingDefinition<SettingKey>);
+			}
 		}
+	}
 
-		new Setting(containerEl)
-			.setName("Auto-sync frequency")
-			.setDesc(
-				"How often to sync automatically in the background. Every 5–10 minutes " +
-					"is a good balance; shorter is more up-to-date but busier, and Never " +
-					"leaves you in full manual control. Default: Never."
-			)
-			.addDropdown((dd) =>
-				dd
-					.addOptions({
-						"0": "Never",
-						"1": "Every 1 minute",
-						"5": "Every 5 minutes",
-						"10": "Every 10 minutes",
-						"30": "Every 30 minutes",
-						"60": "Every hour",
-						"1440": "Every 24 hours",
-					})
-					.setValue(String(this.settings.autoSyncMinutes))
-					.onChange(async (value) => {
-						this.settings.autoSyncMinutes = Number.parseInt(value, 10) || 0;
-						await this.save();
-					})
-			);
+	/** Render one definition with the pre-1.13 imperative `Setting` API. */
+	private renderLegacy(
+		containerEl: HTMLElement,
+		def: SettingDefinition<SettingKey>
+	): void {
+		if (!isVisible(def)) return;
 
-		new Setting(containerEl)
-			.setName("Sync on startup")
-			.setDesc("Run a sync automatically when Obsidian finishes loading.")
-			.addToggle((toggle) =>
-				toggle.setValue(this.settings.syncOnStartup).onChange(async (value) => {
-					this.settings.syncOnStartup = value;
-					await this.save();
-				})
-			);
+		const setting = new Setting(containerEl).setName(def.name);
+		if (def.desc) setting.setDesc(def.desc);
+
+		if ("render" in def && def.render) {
+			// No SettingGroup exists on this code path; every `render` callback in
+			// this file takes only the Setting.
+			def.render(setting, undefined as never);
+			return;
+		}
+		if (!("control" in def) || !def.control) return;
+
+		const control = def.control;
+		const commit = async (value: unknown) => {
+			await this.setControlValue(control.key, value);
+			// Re-render only for the keys that gate a `visible` predicate —
+			// see the note in setControlValue.
+			if (VISIBILITY_KEYS.has(control.key)) this.display();
+		};
+		const current = this.getControlValue(control.key);
+
+		switch (control.type) {
+			case "toggle":
+				setting.addToggle((toggle) =>
+					toggle.setValue(Boolean(current)).onChange((value) => void commit(value))
+				);
+				break;
+			case "dropdown":
+				setting.addDropdown((dd) =>
+					dd
+						.addOptions(control.options)
+						.setValue(String(current ?? ""))
+						.onChange((value) => void commit(value))
+				);
+				break;
+			case "text":
+			case "number":
+				setting.addText((text) => {
+					if (control.placeholder) text.setPlaceholder(control.placeholder);
+					if (control.type === "number") text.inputEl.type = "number";
+					text
+						.setValue(String(current ?? ""))
+						.onChange((value) => void commit(value));
+				});
+				break;
+			default:
+				break;
+		}
 	}
 }

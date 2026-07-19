@@ -19,7 +19,6 @@
   "license": "MIT",
   "devDependencies": {
     "@types/node": "^26.1.1",
-    "builtin-modules": "^5.0.0",
     "esbuild": "^0.28.0",
     "obsidian": "^1.5.7",
     "tslib": "^2.6.2",

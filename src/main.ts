@@ -3,6 +3,7 @@ import {
 	Plugin,
 	TFile,
 	TFolder,
+	Vault,
 	normalizePath,
 } from "obsidian";
 import { OpenWhisprCli, OpenWhisprCliError } from "./cli";
@@ -352,14 +353,18 @@ export default class OpenWhisprPlugin extends Plugin {
 	private indexExistingNotes(): Map<string, TFile> {
 		const index = new Map<string, TFile>();
 		const folder = normalizePath(this.settings.syncFolder);
-		const prefix = folder === "/" || folder === "" ? "" : folder + "/";
+		const root =
+			folder && folder !== "/"
+				? this.app.vault.getAbstractFileByPath(folder)
+				: this.app.vault.getRoot();
+		if (!(root instanceof TFolder)) return index;
 
-		for (const file of this.app.vault.getMarkdownFiles()) {
-			if (prefix && !file.path.startsWith(prefix)) continue;
+		Vault.recurseChildren(root, (file) => {
+			if (!(file instanceof TFile) || file.extension !== "md") return;
 			const cache = this.app.metadataCache.getFileCache(file);
-			const id = cache?.frontmatter?.openwhispr_id;
+			const id: unknown = cache?.frontmatter?.openwhispr_id;
 			if (id != null) index.set(String(id), file);
-		}
+		});
 		return index;
 	}
 
