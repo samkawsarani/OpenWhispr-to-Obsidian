@@ -175,8 +175,10 @@ export class OpenWhisprCli {
 	}
 
 	/** `openwhispr notes list --format json` */
-	async listNotes(): Promise<OpenWhisprNote[]> {
-		const data = await this.runJson<unknown>(["notes", "list", "--format", "json"]);
+	async listNotes(limit: number): Promise<OpenWhisprNote[]> {
+		const data = await this.runJson<unknown>([
+			"notes", "list", "--limit", String(limit), "--format", "json"
+		]);
 		if (Array.isArray(data)) return data as OpenWhisprNote[];
 		// Some backends may wrap the array in { notes: [...] } / { data: [...] }.
 		if (data && typeof data === "object") {

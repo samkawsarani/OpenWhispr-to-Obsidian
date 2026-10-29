@@ -165,7 +165,10 @@ export default class OpenWhisprPlugin extends Plugin {
 		try {
 			await this.ensureFolder(this.settings.syncFolder);
 			const folderNames = await this.fetchFolderNames();
-			const notes = this.selectNotes(await this.cli().listNotes(), folderNames);
+			const notes = this.selectNotes(
+				await this.cli().listNotes(this.settings.syncAllHistory ? 1e4 : this.settings.syncLimit || 50),
+				folderNames
+			);
 
 			const result: SyncResult = {
 				created: 0,
